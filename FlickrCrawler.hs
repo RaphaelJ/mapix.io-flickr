@@ -2,6 +2,7 @@
 
 import Control.Applicative
 import qualified Control.Exception as E
+import Control.Lens hiding ((<.>))
 import Control.Monad
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Trans.Class (lift)
@@ -17,33 +18,27 @@ import System.IO.Unsafe (unsafeInterleaveIO)
 import System.Random
 import Text.Printf
 
-import Control.Monad.Logger (runStderrLoggingT)
-
 import Database.Persist (
       entityKey, entityVal, insert_, insertBy, insertUnique, selectList
     )
 import Database.Persist.Sql (runMigration)
-import Database.Persist.Sqlite (runSqlConn, withSqliteConn)
 
 import qualified Flickr.API as F
 import qualified Flickr.Photos as F
 
-import Control.Monad.Trans.Resource (allocate, release, runResourceT)
-import Network.HTTP.Conduit (
-      Request, closeManager, conduitManagerSettings, httpLbs
-    , managerResponseTimeout, newManager, parseUrl, responseBody
-    )
-
 import System.Random.Shuffle (shuffle')
 
+import Network.Wreq (getWith, responseBody)
+
 import Model
+import Util (withHttpSqlite)
 
 data Photo = Photo {
       pId       :: Text
     , pTitle    :: Text
     , pUrl      :: Text
     , pTags     :: [Text]
-    , pImageReq :: Request
+    , pImageUrl :: String
     , pImageExt :: String
     , pWidth    :: Int
     , pHeight   :: Int
@@ -62,10 +57,10 @@ main :: IO ()
 main = do
     args <- getArgs
     case args of
-        [dictFile, sqliteFile, dstDir] -> runResourceT $ do
+        [dictFile, sqliteFile, dstDir] -> do
             dict <- lines <$> liftIO (readFile dictFile)
 
-            withHttpSql sqliteFile $ \http -> do
+            withHttpSqlite sqliteFile $ \httpOpts -> do
                 runMigration migrateFlickr
 
                 -- Retrieve already fetched images from the database.
@@ -77,7 +72,7 @@ main = do
                 pics <- liftIO $ photos (mkStdGen 0) dict skipIds
 
                 forM_ (zip [(length skipIds + 1)..] pics) $ \(i, pic) -> do
-                    mKey <- addPhoto http dstDir pic
+                    mKey <- addPhoto httpOpts dstDir pic
 
                     case mKey of
                         Just key ->
@@ -91,31 +86,16 @@ main = do
                      \will be stored and <dest dir> the directory where images \
                      \will be stored."
   where
-    -- Runs the given action with an HTTP manager and a SQLite connection.
-    withHttpSql sqliteFile action = do
-        let httpSetts = conduitManagerSettings {
-                managerResponseTimeout = Just 30000000
-            }
-
-        (httpKey, http) <- allocate (newManager httpSetts) closeManager
-
-        ret <- runStderrLoggingT $ withSqliteConn (T.pack sqliteFile) $ \conn ->
-            runSqlConn (action http) conn
-
-        release httpKey
-
-        return ret
-
-    addPhoto http dstDir Photo { .. } = do
+    addPhoto httpOpts dstDir Photo { .. } = do
         let path = dstDir </> T.unpack pId <.> pImageExt
 
-        bs <- httpLbs pImageReq http
+        bs <- liftIO $ getWith httpOpts pImageUrl
 
         runMaybeT $ do
             key <- MaybeT $ insertUnique $ FlickrImage pId pTitle pUrl pWidth
                                                        pHeight
 
-            liftIO $ B.writeFile path (responseBody bs)
+            liftIO $ B.writeFile path (bs ^. responseBody)
 
             lift $ mapM_ (insertTag key) pTags
 
@@ -139,49 +119,49 @@ photos gen dict skip =
 
     -- Fetches the first page of every word, then tries the second page for the
     -- same set of words.
-    go []       []  _    _   = return []
-    go []       ws' page set = go (reverse ws') [] (page + 1) set
-    go (w : ws) ws' page set = unsafeInterleaveIO $ do
+    go []       []  _    _    = return []
+    go []       ws' page imgs = go (reverse ws') [] (page + 1) imgs
+    go (w : ws) ws' page imgs = unsafeInterleaveIO $ do
         (ctx, pics) <- F.flick $ F.withPageSize pageSize $
             let filters' = filters { F.s_text = Just w }
             in F.pagedCall (Just page) $ F.search Nothing filters' []
 
-        (res, set') <- goPix pics set
+        (res, imgs') <- goPix pics imgs
 
         let Just nPages = F.photoCtxtPages ctx
 
         -- Goes to the next word, removes the word if it was the last page.
-        rest <- if nPages > page then go ws (w : ws') page set'
-                                 else go ws ws'       page set'
+        rest <- if nPages > page then go ws (w : ws') page imgs'
+                                 else go ws ws'       page imgs'
 
         return $ res ++ rest
 
     -- Fetches the given list of images, ignores duplicates.
-    goPix []       set = return ([], set)
-    goPix (p : ps) set | S.member picId set = goPix ps set
-                       | otherwise          = E.handle onException $ do
+    goPix []       imgs = return ([], imgs)
+    goPix (p : ps) imgs | S.member picId imgs = goPix ps imgs
+                        | otherwise           = E.handle onException $ do
         sizes <- F.flick $ F.getSizes picId
         let Just small = find ((== "Small 320") . F.sizeDetailsLabel) sizes
-        imageRequest <- parseUrl $ F.sizeDetailsSource small
 
         details <- F.flick $ F.getInfo picId (Just secret)
 
-        let photoId = T.pack picId
-            title   = T.pack $ F.photoTitle p
-            tags    = map (T.pack . F.tagDetailsName)
+        let photoId  = T.pack picId
+            title    = T.pack $ F.photoTitle p
+            tags     = map (T.pack . F.tagDetailsName)
                           (F.photoDetailsTags details)
-            urls    = F.photoDetailsURLs details
-            url     = T.pack $ F.urlDetailsURL $ head urls
-            ext     = takeExtension $ F.sizeDetailsSource small
-            width   = F.sizeDetailsWidth  small
-            height  = F.sizeDetailsHeight small
-            photo   = Photo photoId title url tags imageRequest ext width height
+            urls     = F.photoDetailsURLs details
+            url      = T.pack $ F.urlDetailsURL $ head urls
+            imageUrl = F.sizeDetailsSource small
+            ext      = takeExtension $ F.sizeDetailsSource small
+            width    = F.sizeDetailsWidth  small
+            height   = F.sizeDetailsHeight small
+            photo    = Photo photoId title url tags imageUrl ext width height
 
-        (rest, set') <- goPix ps (S.insert picId set)
+        (rest, imgs') <- goPix ps (S.insert picId imgs)
 
-        return (photo : rest, set')
+        return (photo : rest, imgs')
       where
         picId  = F.photoId p
         secret = F.photoSecret p
 
-        onException (_ :: E.SomeException) = goPix ps set
+        onException (_ :: E.SomeException) = goPix ps imgs

@@ -28,7 +28,7 @@ import qualified Flickr.Photos as F
 
 import System.Random.Shuffle (shuffle')
 
-import Network.Wreq (getWith, responseBody)
+import Network.Wreq (getWith, defaults, manager, responseBody)
 
 import Model
 import Util (withHttpSqlite)
@@ -60,7 +60,7 @@ main = do
         [dictFile, sqliteFile, dstDir] -> do
             dict <- lines <$> liftIO (readFile dictFile)
 
-            withHttpSqlite sqliteFile $ \httpOpts -> do
+            withHttpSqlite sqliteFile $ \httpMan -> do
                 runMigration migrateFlickr
 
                 -- Retrieve already fetched images from the database.
@@ -72,7 +72,7 @@ main = do
                 pics <- liftIO $ photos (mkStdGen 0) dict skipIds
 
                 forM_ (zip [(length skipIds + 1)..] pics) $ \(i, pic) -> do
-                    mKey <- addPhoto httpOpts dstDir pic
+                    mKey <- addPhoto httpMan dstDir pic
 
                     case mKey of
                         Just key ->
@@ -81,15 +81,16 @@ main = do
                         Nothing  -> return ()
         _            -> do
             putStrLn "usage: loader-flickr <dict file> <sqlite db> <dest dir>"
-            putStrLn "where <dict file> if a file containing keywords to \
-                     \search, <sqlite db> the SQLite database where meta-data \
-                     \will be stored and <dest dir> the directory where images \
-                     \will be stored."
+            putStrLn "where <dict file> if a file containing keywords to"
+            putStrLn "search, <sqlite db> the SQLite database where meta-data"
+            putStrLn "will be stored and <dest dir> the directory where images"
+            putStrLn "will be stored."
   where
-    addPhoto httpOpts dstDir Photo { .. } = do
+    addPhoto httpMan dstDir Photo { .. } = do
         let path = dstDir </> T.unpack pId <.> pImageExt
 
-        bs <- liftIO $ getWith httpOpts pImageUrl
+        let opts = defaults & manager .~ Right httpMan
+        bs <- liftIO $ getWith opts pImageUrl
 
         runMaybeT $ do
             key <- MaybeT $ insertUnique $ FlickrImage pId pTitle pUrl pWidth

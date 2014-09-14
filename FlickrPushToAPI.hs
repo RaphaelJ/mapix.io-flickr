@@ -1,12 +1,15 @@
 {-# LANGUAGE OverloadedStrings #-}
 
+import Control.Applicative
 import Control.Monad
 import Control.Monad.Reader (runReaderT)
 import Data.ByteString (ByteString)
-import Data.Map as M
+import qualified Data.Map as M
 import Data.String (fromString)
 import qualified Data.Text as T
-import Database.Persist (Entity (..), selectList, insert_)
+import Database.Persist (
+      Entity (..), (==.), selectKeysList, selectList, insert_
+    )
 import Database.Persist.Sql (runMigration)
 import Network.HTTP.Client (Manager)
 import Network.HTTP.Client.Conduit (HasHttpManager (getHttpManager))
@@ -53,16 +56,24 @@ main = do
             withHttpSqlite sqliteFile $ \manager -> do
                 runMigration migrateFlickr
 
-                let env = APIEnvironment manager apiRoot (fromString apiKey)
+                let env       = APIEnvironment manager apiRoot
+                                               (fromString apiKey)
+                    tagTxt    = T.pack tag
+                    tagPrefix = tag ++ ":"
 
                 pics <- selectList [] []
                 forM_ pics $ \(Entity picId pic) -> do
                     let photoId   = flickrImagePhotoId pic
                         Just path = photoId `M.lookup` photoIdToFile
 
-                    Just code <- runReaderT (postImage path []) env
+                    tags <-     map (T.pack . (tagPrefix ++) . show)
+                            <$> selectKeysList [ FlickrImageTagImage ==. picId ]
+                                               []
+
+                    Just code <- runReaderT (postImage path (tagTxt : tags)) env
+
                     insert_ (ApiImage code picId)
-        _            -> do
+        _ -> do
             putStrLn "usage: flickr-push-to-api <api root> <api key> \
                      \<sqlite db> <dir> <tag>"
             putStrLn "where <api root> is the URL of end point of the API,"

@@ -3,23 +3,26 @@
 import Control.Applicative
 import Control.Monad
 import Control.Monad.Reader (runReaderT)
+import Control.Monad.Logger (LoggingT, runStderrLoggingT)
 import Data.ByteString (ByteString)
-import qualified Data.Map as M
 import Data.String (fromString)
-import qualified Data.Text as T
 import Database.Persist (
       Entity (..), (==.), selectKeysList, selectList, insert_
     )
 import Database.Persist.Sql (runMigration)
-import Network.HTTP.Client (Manager)
+import Database.Persist.Sqlite (SqlPersistT, runSqlConn, withSqliteConn)
+import Network.HTTP.Client (Manager, managerResponseTimeout, withManager)
 import Network.HTTP.Client.Conduit (HasHttpManager (getHttpManager))
+import Network.HTTP.Client.TLS (tlsManagerSettings)
 import System.Directory (getDirectoryContents)
 import System.Environment (getArgs)
 import System.FilePath ((</>), takeBaseName)
 
+import qualified Data.Map   as M
+import qualified Data.Text  as T
+
 import API (HasAPIConfig (..), postImage)
 import Model
-import Util (withHttpSqlite)
 
 data APIEnvironment = APIEnvironment {
       aeManager :: Manager
@@ -81,3 +84,15 @@ main = do
             putStrLn "which contains the image mapping, <dir> the directory"
             putStrLn "which contains the images and <tag> the tag which will"
             putStrLn "be used to group the images and to prefix their tags."
+
+-- | Runs the given action with an HTTP manager and a SQLite connection.
+withHttpSqlite :: String -> (Manager -> SqlPersistT (LoggingT IO) a) -> IO a
+withHttpSqlite sqliteFile action =
+    withManager settings $ \manager ->
+        runStderrLoggingT $
+            withSqliteConn (T.pack sqliteFile) $ \conn ->
+                runSqlConn (action manager) conn
+  where
+    settings = tlsManagerSettings {
+                      managerResponseTimeout = Just maxBound
+                    }

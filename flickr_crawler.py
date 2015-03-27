@@ -4,6 +4,8 @@
 import argparse
 import flickrapi
 import json
+import os.path
+import urllib
 
 from collections    import namedtuple
 
@@ -12,7 +14,7 @@ from collections    import namedtuple
 # Which picture to download. Medium 640 is max. 640 x 640 pixels.
 SOURCE_SIZE = "Medium 640"
 
-Photo = namedtuple("Photo", "id title owner tags url source")
+Photo = namedtuple("Photo", "id title owner tags url")
 Owner = namedtuple("Owner", "id username name")
 
 def photos_stream(flickr):
@@ -34,12 +36,18 @@ def photos_stream(flickr):
 
             info = flickr.photos.getInfo(photo_id=p["id"], secret=p["secret"])
             if is_flickr_error(info):
-                print("Unable to fetch information for a picture. Skipping.")
+                print(
+                    "Unable to fetch information for a picture (%s). Skip."
+                    % p["id"]
+                )
                 continue
 
             sizes = flickr.photos.getSizes(photo_id=p["id"])
             if is_flickr_error(sizes):
-                print("Unable to fetch information picture sources. Skipping.")
+                print(
+                    "Unable to fetch information picture (%s) sources. Skip."
+                    % p["id"]
+                )
                 continue
 
             source = find(
@@ -47,10 +55,19 @@ def photos_stream(flickr):
                 sizes["sizes"]["size"]
             )["source"]
             if source == None:
-                print("The picture has no corresponding image. Skipping.")
+                print(
+                    "The picture (%s) has no corresponding image. Skip."
+                    % p["id"]
+                )
                 continue
             if source[-4:] != ".jpg" and source[-5:] != ".jpeg":
-                print("The picture is not a JPEG image. Skipping.")
+                print("The picture (%s) is not a JPEG image. Skip." % p["id"])
+                continue
+
+            try:
+                jpg = download_url(source)
+            except:
+                print("Failed to download the picture (%s). Skip." % p["id"])
                 continue
 
             owner = Owner(
@@ -66,7 +83,7 @@ def photos_stream(flickr):
                 owner.id, p["id"]
             )
 
-            yield Photo(p["id"], p["title"], owner, tags, url, source)
+            yield (Photo(p["id"], p["title"], owner, tags, url), jpg)
 
         page += 1
         if page >= photos["photos"]["pages"]:
@@ -74,6 +91,25 @@ def photos_stream(flickr):
 
 def is_flickr_error(resp):
     return resp["stat"] != "ok"
+
+def download_url(url):
+    """Returns the file content."""
+    return urllib.request.urlopen(url).read()
+
+def write_file(filepath, content):
+    """Writes the buffer content into the file."""
+
+    if type(content) == str:
+        flag = "w"
+    elif type(content) == bytes:
+        flag = "wb"
+
+    with open(filepath, flag) as f:
+        f.write(content)
+
+def pretty_json(obj):
+    """Renders the object as a pretty JSON string."""
+    return json.dumps(obj, sort_keys=True, indent=4, separators=(',', ': '))
 
 def get_cli_args_parser():
     parser = argparse.ArgumentParser(
@@ -113,10 +149,21 @@ if __name__ == "__main__":
 
     flickr = flickrapi.FlickrAPI(api_key, api_secret, format='parsed-json')
 
-    for p in photos_stream(flickr):
+    for (p, jpg) in photos_stream(flickr):
+        basename  = os.path.join(dest_dir, p.id)
+        jpg_file  = basename + ".jpg"
+        json_file = basename + ".json"
+
+        if os.path.isfile(jpg_file) or os.path.isfile(json_file):
+            print("File %s already exists. Skip." % p.id)
+            continue
+
+        print("%s - %s" % (p.id, p.url))
+
         # Named-tuples are JSON encoded as array. Converts the two named-tuples
         # to dictionnaries before serializing.
         p_dict = p.__dict__
         p_dict["owner"] = p_dict["owner"].__dict__
 
-        print(json.dumps(p_dict))
+        write_file(jpg_file, jpg)
+        write_file(json_file, pretty_json(p_dict))

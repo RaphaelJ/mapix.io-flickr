@@ -1,6 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
 
-import Control.Applicative
 import Control.Monad (mzero)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Logger (LoggingT, runStderrLoggingT)
@@ -16,7 +15,7 @@ import Database.Persist (
     )
 import Database.Persist.Sql (runMigration, transactionSave)
 import Database.Persist.Sqlite (SqlPersistT, runSqlConn, withSqliteConn)
-import Network.HTTP.Client (Manager, managerResponseTimeout, withManager)
+import Network.HTTP.Client (Manager, managerResponseTimeout, newManager)
 import Network.HTTP.Client.Conduit (HasHttpManager (getHttpManager))
 import Network.HTTP.Client.TLS (tlsManagerSettings)
 import System.Directory (getDirectoryContents)
@@ -74,11 +73,11 @@ instance FromJSON Owner where
 
 -- | Pushes every local image into the API end-point.
 --
--- usage: flickr-push-to-api <api root> <api key>  sqlite db> <flickr dir> <tag>
+-- usage: flickr-push-to-api <api root> <api key> <sqlite db> <flickr dir> <tag>
 -- where <api root> is the URL of end point of the API, <api key> the private
--- API key, <sqlite db> the database which will contains image meta-data, <dir>
--- the directory which contains the crawled images and <tag> the tag prefix 
--- which will be used to group the images and their tags.
+-- API key (as a charecter string), <sqlite db> the database which will contains
+-- image meta-data, <dir> the directory which contains the crawled images and
+-- <tag> the tag prefix which will be used to group the images and their tags.
 main :: IO ()
 main = do
     args <- getArgs
@@ -117,7 +116,7 @@ main = do
 
                     -- Pushs to the API.
                     Just apiId <- flip runReaderT env $
-                        postObjects (Just pUrl) jpgPath 
+                        postObjects (Just pUrl) jpgPath
                                     (map (tagPrefix <>) pTags) False
 
                     -- Inserts the meta-data into the database.
@@ -132,19 +131,20 @@ main = do
             putStrLn "usage: flickr-push-to-api <api root> <api key> \
                      \<sqlite db> <flickr dir> <tag>"
             putStrLn "where <api root> is the URL of end point of the API,"
-            putStrLn "<api key> the private API key, <sqlite db> the database "
-            putStrLn "which will contains image meta-datas, <dir> the "
-            putStrLn "directory which contains the crawled images and <tag> "
-            putStrLn "the tag prefix which will be used to group the images "
-            putStrLn "and their tags."
+            putStrLn "<api key> the private API key (as a character string), "
+            putStrLn "<sqlite db> the database which will contains image "
+            putStrLn "meta-datas, <dir> the directory which contains the "
+            putStrLn "crawled images and <tag> the tag prefix which will be "
+            putStrLn "used to group the images and their tags."
 
 -- | Runs the given action with an HTTP manager and a SQLite connection.
 withHttpSqlite :: String -> (Manager -> SqlPersistT (LoggingT IO) a) -> IO a
-withHttpSqlite sqliteFile action =
-    withManager settings $ \manager ->
-        runStderrLoggingT $
-            withSqliteConn (T.pack sqliteFile) $ \conn ->
-                runSqlConn (action manager) conn
+withHttpSqlite sqliteFile action = do
+    manager <- newManager settings
+
+    runStderrLoggingT $
+        withSqliteConn (T.pack sqliteFile) $ \conn ->
+            runSqlConn (action manager) conn
   where
     settings = tlsManagerSettings {
                       managerResponseTimeout = Just maxBound

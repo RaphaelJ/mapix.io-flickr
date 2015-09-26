@@ -195,7 +195,8 @@ if __name__ == "__main__":
     flickr = flickrapi.FlickrAPI(api_key, api_secret, format='parsed-json')
 
     ids = existing_files(dest_dir)
-    print ("%d pictures already downloaded." % len(ids))
+    n_existing = len(ids)
+    print ("%d pictures already downloaded." % n_existing)
 
     for (p, jpg) in photos_stream(ids, flickr, license):
         basename  = os.path.join(dest_dir, p.id)
@@ -215,3 +216,6 @@ if __name__ == "__main__":
 
         write_file(jpg_file, jpg)
         write_file(json_file, pretty_json(p_dict))
+
+    n_downloaded = len(ids) - n_existing
+    print ("%d pictures downloaded, %d in total." % (n_downloaded, len(ids)))
